@@ -7,6 +7,7 @@ import os
 import sys
 import glob
 import shutil
+import re
 
 #this maps tokens in one vocabulary to tokens in another, using multiple tokens
 #if necessary
@@ -124,6 +125,14 @@ def generate_train_config(npz_file_path, config_path):
         else:
             raise FileNotFoundError("'special:model.yml' not found in the .npz file")
     with open(config_path, 'w') as file:
+        yaml_content['model'] = 'modified_model.npz'
+        yaml_content['vocabs'] = ['modified_vocab.yml', 'modified_vocab.yml']
+        yaml.dump(yaml_content, file, default_flow_style=False, sort_keys=False)
+
+def generate_decoder_config(decoder_path, config_path):
+    with open(decoder_path, 'r') as f:
+        yaml_content = yaml.safe_load(f)
+    with open(config_path, 'w') as file:
         yaml_content['models'] = ['modified_model.npz']
         yaml_content['vocabs'] = ['modified_vocab.yml', 'modified_vocab.yml']
         yaml.dump(yaml_content, file, default_flow_style=False, sort_keys=False)
@@ -135,11 +144,6 @@ def find_and_parse_vocab(local_model_dir):
     with open(vocab_files[0], "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-# Example usage
-# NOTE: since the yaml in the model is not read for some reason by Marian,
-# all model details also have to be in the decoder file, copy them by hand
-# for now. Don't run this and overwrite the modified decoder.yml
-# modify_yaml_file('decoder.yml','modified_decoder.yml')
 
 def modify_special_model(npz_file_path, dim_vocab_1, dim_vocab_2,output_path):
     # Load the .npz file
@@ -147,9 +151,12 @@ def modify_special_model(npz_file_path, dim_vocab_1, dim_vocab_2,output_path):
     with np.load(npz_file_path, allow_pickle=True) as data:
         for k in data:
             if k == "special:model.yml":
-                print(d[k])
                 info = data[k].tobytes().decode()
-                info = info.replace("57829", "128000")
+                print(info)
+                #TODO: remove hardcoding
+                replace_string = fr"\1 {dim_vocab_1}\3 {dim_vocab_2}"
+                info = re.sub(r"(dim-vocabs:\n\s+-)\s+(\d+)(\n\s+-)\s+(\d+)",
+                              replace_string,info, re.MULTILINE)
                 d[k] = np.bytes_(info)
                 print(d[k])
             else:
@@ -173,12 +180,13 @@ def main():
         shutil.copytree(args.local_model_dir, args.output_model_dir, dirs_exist_ok=True)
         print(f"Created Output Model Directory: {args.output_model_dir}")
 
-    marian_vocab = find_and_parse_vocab(args.local_model_dir)
-    
     lm_tokenizer = AutoTokenizer.from_pretrained(args.hf_model_name)
     lm_vocab = dict(sorted(lm_tokenizer.get_vocab().items(), key=lambda item: item[1]))
     with open(os.path.join(args.output_model_dir, "modified_vocab.yml"), 'w', encoding='utf-8') as file:
         yaml.dump(lm_vocab, file, allow_unicode=True, default_flow_style=False,sort_keys=False)
+
+
+    marian_vocab = find_and_parse_vocab(args.local_model_dir)
     
     vocab_map = vocab_intersection(
         lm_tokenizer,
@@ -196,7 +204,14 @@ def main():
         os.path.join(args.output_model_dir,"modified_model.npz"),
         os.path.join(args.output_model_dir,"modified_train.yml"))
     
-    modify_special_model(os.path.join(args.output_model_dir,"modified_model.npz"),128000,128000,os.path.join(args.output_model_dir,"modified_model.npz"))
+
+    generate_decoder_config(
+        os.path.join(args.output_model_dir,"decoder.yml"),
+        os.path.join(args.output_model_dir,"modified_decoder.yml"))
+    
+    #vocab_length = 131072
+    vocab_length = len(lm_vocab)
+    modify_special_model(os.path.join(args.output_model_dir,"modified_model.npz"),vocab_length,vocab_length,os.path.join(args.output_model_dir,"modified_model.npz"))
     
 if __name__ == "__main__":
     main()
