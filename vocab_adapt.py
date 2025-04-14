@@ -153,11 +153,10 @@ def modify_special_model(npz_file_path, dim_vocab_1, dim_vocab_2,output_path):
             if k == "special:model.yml":
                 info = data[k].tobytes().decode()
                 print(info)
-                #TODO: remove hardcoding
                 replace_string = fr"\1 {dim_vocab_1}\3 {dim_vocab_2}"
                 info = re.sub(r"(dim-vocabs:\n\s+-)\s+(\d+)(\n\s+-)\s+(\d+)",
                               replace_string,info, re.MULTILINE)
-                d[k] = np.bytes_(info)
+                d[k] = np.fromstring(info, dtype="int8")
                 print(d[k])
             else:
                 d[k] = data[k]
@@ -172,6 +171,7 @@ def main():
     
     args = parser.parse_args()
     
+    """
     if os.path.exists(args.output_model_dir) and not args.overwrite:
         print(f"Error: Output model directory '{args.output_model_dir}' already exists.", file=sys.stderr)
         sys.exit(1)
@@ -179,11 +179,37 @@ def main():
         os.makedirs(args.output_model_dir,exist_ok=True)
         shutil.copytree(args.local_model_dir, args.output_model_dir, dirs_exist_ok=True)
         print(f"Created Output Model Directory: {args.output_model_dir}")
+    """
 
     lm_tokenizer = AutoTokenizer.from_pretrained(args.hf_model_name)
-    lm_vocab = dict(sorted(lm_tokenizer.get_vocab().items(), key=lambda item: item[1]))
-    with open(os.path.join(args.output_model_dir, "modified_vocab.yml"), 'w', encoding='utf-8') as file:
-        yaml.dump(lm_vocab, file, allow_unicode=True, default_flow_style=False,sort_keys=False)
+
+    # Replace potential line breaks in the symbols, since those are not supported by Marian. This
+    # should have no effect, since those symbols seem to be junk. I'm not sure if it's actually possible
+    # to have line breaks in symbols (the bug was caused by yaml.dump adding line breaks), but keep this
+    # in just in case
+    
+    lm_vocab = sorted(lm_tokenizer.get_vocab().items(), key=lambda item: item[1])
+    lm_vocab_dict = {k.replace("\n",""): v for (k,v) in lm_vocab}
+    print(f"Extracted {args.hf_model_name} vocab")
+    vocab_yaml = yaml.dump(lm_vocab_dict, allow_unicode=True,sort_keys=False, width=10000000000000)
+
+    # for some reason yaml dump just keep adding the line break to some entries, even with the width setting
+    # fix manually
+    
+    with open(os.path.join(args.output_model_dir, "modified_vocab.yml"), 'w', encoding='utf-8') as vocab_yaml_file:
+        fixed_vocab_yaml = ""
+        partial_sentence = ""
+        for line in vocab_yaml.split("\n"):
+            if not re.match("^.*:\s+\d+$",line):
+                # need to quote these partial sentences, otherwise downstream processing fails
+                if not partial_sentence:
+                    partial_sentence += '"'
+                partial_sentence += line
+            elif partial_sentence:
+                vocab_yaml_file.write(partial_sentence + '"' + line + "\n")
+                partial_sentence = ""
+            else:
+                vocab_yaml_file.write(line + "\n")
 
 
     marian_vocab = find_and_parse_vocab(args.local_model_dir)
