@@ -129,12 +129,17 @@ def generate_train_config(npz_file_path, config_path):
         yaml_content['vocabs'] = ['modified_vocab.yml', 'modified_vocab.yml']
         yaml.dump(yaml_content, file, default_flow_style=False, sort_keys=False)
 
-def generate_decoder_config(decoder_path, config_path):
-    with open(decoder_path, 'r') as f:
-        yaml_content = yaml.safe_load(f)
+def generate_decoder_config(decoder_path, train_path, config_path):
+    with open(decoder_path, 'r') as decoder_cfg, open(train_path) as train_cfg:
+        yaml_content = yaml.safe_load(decoder_cfg)
+        train_yaml_content = yaml.safe_load(train_cfg)
     with open(config_path, 'w') as file:
         yaml_content['models'] = ['modified_model.npz']
         yaml_content['vocabs'] = ['modified_vocab.yml', 'modified_vocab.yml']
+        for key in train_yaml_content:
+            if key not in ["model","output-omit-bias", "transformer-pool", "transformer-postprocess-top", "ulr", "ulr-dim-emb", "ulr-trainable-transformation"]:
+                yaml_content[key] = train_yaml_content[key]
+
         yaml.dump(yaml_content, file, default_flow_style=False, sort_keys=False)
 
 def find_and_parse_vocab(local_model_dir):
@@ -144,23 +149,62 @@ def find_and_parse_vocab(local_model_dir):
     with open(vocab_files[0], "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-
+#TODO: why does this still not generate a config that marian reads consistently
+# on Windows    
 def modify_special_model(npz_file_path, dim_vocab_1, dim_vocab_2,output_path):
     # Load the .npz file
     d = dict()
-    with np.load(npz_file_path, allow_pickle=True) as data:
+    with np.load(npz_file_path, allow_pickle=False) as data:
         for k in data:
             if k == "special:model.yml":
+                print(data[k])
                 info = data[k].tobytes().decode()
                 print(info)
                 replace_string = fr"\1 {dim_vocab_1}\3 {dim_vocab_2}"
                 info = re.sub(r"(dim-vocabs:\n\s+-)\s+(\d+)(\n\s+-)\s+(\d+)",
                               replace_string,info, re.MULTILINE)
-                d[k] = np.fromstring(info, dtype="int8")
+                info_b = info.encode()
+                
+                d[k] = np.frombuffer(info_b, dtype="int8")
                 print(d[k])
             else:
                 d[k] = data[k]
         np.savez(output_path, **d)
+
+def lm_vocab_to_marian(lm_vocab, output_model_dir):
+    lm_vocab_dict = {k.replace("\n",""): v for (k,v) in lm_vocab}
+
+    vocab_yaml = yaml.dump(lm_vocab_dict, allow_unicode=True,sort_keys=False, width=10000000000000)
+
+    # for some reason yaml dump just keep adding the line break to some entries, even with the width setting
+    # fix manually
+
+    fixed_vocab_yaml = []
+    partial_sentence = ""
+    for line in vocab_yaml.split("\n"):
+        if not re.match("^.*:\s+\d+$",line):
+            # need to quote these partial sentences, otherwise downstream processing fails
+            if not partial_sentence:
+                partial_sentence += '"'
+            partial_sentence += line
+        elif partial_sentence:
+            fixed_vocab_yaml.append(partial_sentence + '"' + line)
+            partial_sentence = ""
+        else:
+            fixed_vocab_yaml.append(line)
+    
+    with open(os.path.join(output_model_dir, "modified_vocab.yml"), 'w', encoding='utf-8') as vocab_yaml_file:
+        for line_no, line in enumerate(fixed_vocab_yaml):
+            # long symbols cause crashes, they are junk anyway, so replace them
+            # marian decoding happens mostly for testing anyway
+            
+            if len(line) > 50:
+                replacement = f"JUNKSYMBOL{line_no}"
+                line = re.sub(r".*(?=: \d+$)",replacement,line)
+        
+            vocab_yaml_file.write(line + "\n")
+        
+        
 
 def main():
     parser = argparse.ArgumentParser(description="Adapt a Marian model to use the vocabulary of a HF transformers language model.")
@@ -171,7 +215,6 @@ def main():
     
     args = parser.parse_args()
     
-    """
     if os.path.exists(args.output_model_dir) and not args.overwrite:
         print(f"Error: Output model directory '{args.output_model_dir}' already exists.", file=sys.stderr)
         sys.exit(1)
@@ -179,8 +222,7 @@ def main():
         os.makedirs(args.output_model_dir,exist_ok=True)
         shutil.copytree(args.local_model_dir, args.output_model_dir, dirs_exist_ok=True)
         print(f"Created Output Model Directory: {args.output_model_dir}")
-    """
-
+    
     lm_tokenizer = AutoTokenizer.from_pretrained(args.hf_model_name)
 
     # Replace potential line breaks in the symbols, since those are not supported by Marian. This
@@ -189,28 +231,9 @@ def main():
     # in just in case
     
     lm_vocab = sorted(lm_tokenizer.get_vocab().items(), key=lambda item: item[1])
-    lm_vocab_dict = {k.replace("\n",""): v for (k,v) in lm_vocab}
     print(f"Extracted {args.hf_model_name} vocab")
-    vocab_yaml = yaml.dump(lm_vocab_dict, allow_unicode=True,sort_keys=False, width=10000000000000)
 
-    # for some reason yaml dump just keep adding the line break to some entries, even with the width setting
-    # fix manually
-    
-    with open(os.path.join(args.output_model_dir, "modified_vocab.yml"), 'w', encoding='utf-8') as vocab_yaml_file:
-        fixed_vocab_yaml = ""
-        partial_sentence = ""
-        for line in vocab_yaml.split("\n"):
-            if not re.match("^.*:\s+\d+$",line):
-                # need to quote these partial sentences, otherwise downstream processing fails
-                if not partial_sentence:
-                    partial_sentence += '"'
-                partial_sentence += line
-            elif partial_sentence:
-                vocab_yaml_file.write(partial_sentence + '"' + line + "\n")
-                partial_sentence = ""
-            else:
-                vocab_yaml_file.write(line + "\n")
-
+    lm_vocab_to_marian(lm_vocab, args.output_model_dir)
 
     marian_vocab = find_and_parse_vocab(args.local_model_dir)
     
@@ -226,6 +249,10 @@ def main():
         marian_vocab["<unk>"],
         embedding_init="weighted_average")
     
+    vocab_length = len(lm_vocab)
+    #vocab_length = 131072
+    modify_special_model(os.path.join(args.output_model_dir,"modified_model.npz"),vocab_length,vocab_length,os.path.join(args.output_model_dir,"modified_model.npz"))
+
     generate_train_config(
         os.path.join(args.output_model_dir,"modified_model.npz"),
         os.path.join(args.output_model_dir,"modified_train.yml"))
@@ -233,11 +260,8 @@ def main():
 
     generate_decoder_config(
         os.path.join(args.output_model_dir,"decoder.yml"),
+        os.path.join(args.output_model_dir,"modified_train.yml"),
         os.path.join(args.output_model_dir,"modified_decoder.yml"))
-    
-    #vocab_length = 131072
-    vocab_length = len(lm_vocab)
-    modify_special_model(os.path.join(args.output_model_dir,"modified_model.npz"),vocab_length,vocab_length,os.path.join(args.output_model_dir,"modified_model.npz"))
     
 if __name__ == "__main__":
     main()
