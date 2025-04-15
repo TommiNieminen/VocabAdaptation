@@ -64,10 +64,9 @@ def modify_yaml_file(file_path, out_file_path):
     with open(out_file_path, 'w') as file:
         yaml.dump(data, file, default_flow_style=False, sort_keys=False)
 
-def update_vocab_embeddings(model_dir, vocab_map, unk_id, embedding_init="weighted_average"):
-    # Load the npz file
-    npz_file = glob.glob(os.path.join(model_dir, "*.npz"), recursive=False)[0]
-    data = np.load(npz_file, allow_pickle=True)
+def update_vocab_embeddings(original_model_npz_path, updated_model_npz_path, vocab_map, unk_id, embedding_init="weighted_average"):
+    
+    data = np.load(original_model_npz_path, allow_pickle=True)
     emb_matrix = data['Wemb']  # Extract embeddings
     logit_emb_matrix = data['decoder_ff_logit_out_b']  # Extract embeddings
     
@@ -107,13 +106,19 @@ def update_vocab_embeddings(model_dir, vocab_map, unk_id, embedding_init="weight
                 new_logit_emb_matrix[0][index] = np.random.rand(1)
             split_ids.append(index)
         else:
-            # If no matching indexes, use the unknown embedding
-            new_emb_matrix[index] = emb_matrix[unk_id]
+            # If no matching indexes, use the unknown embedding as starting, except for pad token
+            # which we just set as zero (pad is the generation start token in HF Marian models)
+            if symbol == "<pad>":
+                new_emb_matrix[index] = np.zeros(embedding_dim)
+                new_logit_emb_matrix[0][index] = np.float32(0)
+            else:
+                new_emb_matrix[index] = emb_matrix[unk_id]
+                new_logit_emb_matrix[0][index] = np.float32(0)
     
     print(f"{common_counter} common tokens, {len(split_ids)} tokens were split.")
     
     # Save the updated embeddings back to the .npz file
-    np.savez(os.path.join(model_dir,"modified_model.npz"), **{key: data[key] for key in data.files if key != 'Wemb' and key != "decoder_ff_logit_out_b"}, Wemb=new_emb_matrix, decoder_ff_logit_out_b= new_logit_emb_matrix)
+    np.savez(updated_model_npz_path, **{key: data[key] for key in data.files if key != 'Wemb' and key != "decoder_ff_logit_out_b"}, Wemb=new_emb_matrix, decoder_ff_logit_out_b= new_logit_emb_matrix)
     return split_ids
 
 def generate_train_config(npz_file_path, config_path):
@@ -177,8 +182,7 @@ def lm_vocab_to_marian(lm_vocab, output_model_dir):
     vocab_yaml = yaml.dump(lm_vocab_dict, allow_unicode=True,sort_keys=False, width=10000000000000)
 
     # for some reason yaml dump just keep adding the line break to some entries, even with the width setting
-    # fix manually
-
+    # this part removes those line breaks
     fixed_vocab_yaml = []
     partial_sentence = ""
     for line in vocab_yaml.split("\n"):
@@ -225,10 +229,6 @@ def main():
     
     lm_tokenizer = AutoTokenizer.from_pretrained(args.hf_model_name)
 
-    # Replace potential line breaks in the symbols, since those are not supported by Marian. This
-    # should have no effect, since those symbols seem to be junk. I'm not sure if it's actually possible
-    # to have line breaks in symbols (the bug was caused by yaml.dump adding line breaks), but keep this
-    # in just in case
     
     lm_vocab = sorted(lm_tokenizer.get_vocab().items(), key=lambda item: item[1])
     print(f"Extracted {args.hf_model_name} vocab")
@@ -243,8 +243,11 @@ def main():
         os.path.join(args.output_model_dir,"target.spm"),
         marian_vocab)
     
+    original_model_npz_path = glob.glob(os.path.join(model_dir, "*.npz"), recursive=False)[0]
+    modified_model_npz_path = os.path.join(args.output_model_dir,"modified_model.npz")
     split_ids = update_vocab_embeddings(
-        args.output_model_dir,
+        original_model_npz_path,
+        modified_model_npz_path,
         vocab_map,
         marian_vocab["<unk>"],
         embedding_init="weighted_average")
@@ -262,6 +265,9 @@ def main():
         os.path.join(args.output_model_dir,"decoder.yml"),
         os.path.join(args.output_model_dir,"modified_train.yml"),
         os.path.join(args.output_model_dir,"modified_decoder.yml"))
-    
+
+    # remove the original model, the vocab conversion expects just one model in the folder
+    os.remove(original_model_npz_path)
+
 if __name__ == "__main__":
     main()

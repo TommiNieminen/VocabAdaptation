@@ -405,6 +405,7 @@ def add_special_tokens_to_vocab(model_dir: Path, separate_vocab=False) -> None:
         num_added = add_to_vocab_(vocab, ["<pad>"])
         save_json(vocab, model_dir / "target_vocab.json")
         save_tokenizer_config(model_dir, separate_vocabs=separate_vocab)
+        return num_added
     else:
         vocab = load_yaml(find_vocab_file(model_dir))
         vocab = {k: int(v) for k, v in vocab.items()}
@@ -412,6 +413,7 @@ def add_special_tokens_to_vocab(model_dir: Path, separate_vocab=False) -> None:
         print(f"added {num_added} tokens to vocab")
         save_json(vocab, model_dir / "vocab.json")
         save_tokenizer_config(model_dir)
+        return num_added
 
 
 def check_equal(marian_cfg, k1, k2):
@@ -491,7 +493,7 @@ class OpusState:
 
         # create the tokenizer here because we need to know the eos_token_id
         self.source_dir = source_dir
-        self.tokenizer = self.load_tokenizer()
+        (pad_added, self.tokenizer) = self.load_tokenizer()
         # retrieve EOS token and set correctly
         tokenizer_has_eos_token_id = (
             hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id is not None
@@ -504,7 +506,7 @@ class OpusState:
         pad_token_id = self.tokenizer.pad_token_id if tokenizer_has_pad_token_id else None
 
         if cfg["tied-embeddings-src"]:
-            if pad_token_id is None:
+            if pad_added:
                 self.wemb, self.final_bias = add_emb_entries(self.state_dict["Wemb"], self.state_dict[BIAS_KEY], 1)
                 self.pad_token_id = self.wemb.shape[0] - 1
                 cfg["vocab_size"] = self.pad_token_id + 1
@@ -603,8 +605,8 @@ class OpusState:
 
     def load_tokenizer(self):
         # save tokenizer
-        add_special_tokens_to_vocab(self.source_dir, not self.share_encoder_decoder_embeddings)
-        return MarianTokenizer.from_pretrained(str(self.source_dir))
+        num_added = add_special_tokens_to_vocab(self.source_dir, not self.share_encoder_decoder_embeddings)
+        return (num_added == 1, MarianTokenizer.from_pretrained(str(self.source_dir)))
 
     def load_marian_model(self) -> MarianMTModel:
         state_dict, cfg = self.state_dict, self.hf_config
