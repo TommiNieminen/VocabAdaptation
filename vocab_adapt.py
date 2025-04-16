@@ -243,7 +243,7 @@ def main():
         os.path.join(args.output_model_dir,"target.spm"),
         marian_vocab)
     
-    original_model_npz_path = glob.glob(os.path.join(model_dir, "*.npz"), recursive=False)[0]
+    original_model_npz_path = glob.glob(os.path.join(args.output_model_dir, "*.npz"), recursive=False)[0]
     modified_model_npz_path = os.path.join(args.output_model_dir,"modified_model.npz")
     split_ids = update_vocab_embeddings(
         original_model_npz_path,
